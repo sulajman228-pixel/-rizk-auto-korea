@@ -1,0 +1,110 @@
+
+name: Encar price alerts
+
+on:
+  schedule:
+    - cron: "0 */2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get project
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Search Encar and notify Telegram
+        env:
+          XAPI_KEY: ${{ secrets.XAPI_KEY }}
+          BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          import os, json, requests
+          from pathlib import Path
+
+          headers = {"X-API-Key": os.environ["XAPI_KEY"]}
+          params = {
+              "source": "encar",
+              "sale_type": "normal",
+              "sort": "Price",
+              "limit": 20,
+              "lang": "en"
+          }
+
+          response = requests.get(
+              "https://api.xapikorea.com/v1/search",
+              headers=headers,
+              params=params,
+              timeout=30
+          )
+          response.raise_for_status()
+          cars = response.json().get("results", [])
+
+          file = Path("seen.json")
+          seen = json.loads(file.read_text()) if file.exists() else []
+          known = set(seen)
+          new_ids = []
+
+          for car in cars:
+              car_id = str(car.get("id", ""))
+              if not car_id or car_id in known:
+                  continue
+
+              price = car.get("price_krw", 0)
+              if not price:
+                  continue
+
+              name = " ".join(str(car.get(k, "")) for k in
+                              ["manufacturer", "model", "badge"])
+              year = str(car.get("year", ""))
+              mileage = car.get("mileage_km", 0)
+              url = car.get("encar_url", "")
+              photo = car.get("thumbnail", "")
+
+              message = (
+                  f"🚗 RIZK AUTO — НОВОЕ ОБЪЯВЛЕНИЕ\n\n"
+                  f"{name}\n"
+                  f"Год: {year}\n"
+                  f"Пробег: {mileage:,} км\n"
+                  f"Цена: ₩{price:,}\n\n"
+                  f"Encar: {url}"
+              )
+
+              tg = f"https://api.telegram.org/bot{os.environ['BOT_TOKEN']}/"
+              if photo:
+                  result = requests.post(
+                      tg + "sendPhoto",
+                      data={"chat_id": os.environ["CHAT_ID"],
+                            "photo": photo, "caption": message},
+                      timeout=30
+                  )
+              else:
+                  result = requests.post(
+                      tg + "sendMessage",
+                      data={"chat_id": os.environ["CHAT_ID"],
+                            "text": message},
+                      timeout=30
+                  )
+              result.raise_for_status()
+              new_ids.append(car_id)
+
+          file.write_text(json.dumps((seen + new_ids)[-1000:]))
+          print(f"Найдено новых объявлений: {len(new_ids)}")
+
+      - name: Save seen listings
+        run: |
+          git config user.name "Rizk Auto Bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add seen.json
+          git diff --cached --quiet || (
+            git commit -m "Update seen Encar listings"
+            git push
+          )
